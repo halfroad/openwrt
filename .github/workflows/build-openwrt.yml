@@ -60,6 +60,11 @@ jobs:
           # Prefer PassWall's maintained core/dependency recipes over duplicates.
           ./scripts/feeds install -a -f -p passwall_packages
           ./scripts/feeds install -a -f -p passwall2
+          # Upstream luci-app-weechat currently introduces a Kconfig cycle:
+          # luci-app-weechat -> weechat-full -> weechat-minimal -> luci-app-weechat.
+          # This image does not use WeeChat. Remove only its installed feed link;
+          # merely setting CONFIG_PACKAGE_luci-app-weechat=n cannot fix a cycle.
+          rm -f package/feeds/luci/luci-app-weechat
           git clone --depth 1 https://github.com/vernesong/OpenClash.git \
             /tmp/openclash-source
           mkdir -p package/custom
@@ -157,7 +162,7 @@ jobs:
           kmod-fs-ksmbd
           luci-app-ksmbd
           block-mount
-          luci-app-mount
+          luci-mod-system
           xray-core
           luci-app-passwall2
           luci-app-openclash
@@ -166,7 +171,6 @@ jobs:
           luci-i18n-base-zh-cn
           luci-i18n-aria2-zh-cn
           luci-i18n-ksmbd-zh-cn
-          luci-i18n-mount-zh-cn
           luci-i18n-openvpn-zh-cn
           luci-i18n-passwall2-zh-cn
           kmod-usb-core
@@ -209,19 +213,29 @@ jobs:
           while IFS= read -r pkg; do
             echo "CONFIG_PACKAGE_${pkg}=y" >> .config
           done < /tmp/required-packages
-          make defconfig
+          # Mount Points belongs to luci-mod-system; its translations are in
+          # luci-i18n-base-zh-cn. There is no official luci-app-mount package.
+          make defconfig 2>&1 | tee "$GITHUB_WORKSPACE/output/defconfig.log"
+          # Some Kconfig versions still return success after reporting a cycle.
+          if grep -Eiq 'recursive dependency detected|(^|[[:space:]])error:' \
+            "$GITHUB_WORKSPACE/output/defconfig.log"; then
+            echo "::error::Kconfig reported an error; inspect defconfig.log"
+            exit 1
+          fi
+          cp .config "$GITHUB_WORKSPACE/output/build.config"
+          cp /tmp/required-packages "$GITHUB_WORKSPACE/output/required-packages.txt"
+          missing=0
           while IFS= read -r pkg; do
             if ! grep -Fxq "CONFIG_PACKAGE_${pkg}=y" .config; then
               echo "::error::Required package absent after defconfig: $pkg"
-              exit 1
+              missing=1
             fi
           done < /tmp/required-packages
+          [ "$missing" -eq 0 ]
           # Do not silently produce an image without a requested boot format.
           for sym in TARGET_x86_64 GRUB_IMAGES GRUB_EFI_IMAGES; do
             grep -Fxq "CONFIG_${sym}=y" .config
           done
-          cp .config "$GITHUB_WORKSPACE/output/build.config"
-          cp /tmp/required-packages "$GITHUB_WORKSPACE/output/required-packages.txt"
           mkdir -p files/etc/uci-defaults
           cat > files/etc/uci-defaults/99-custom-defaults <<'EOF'
           #!/bin/sh
